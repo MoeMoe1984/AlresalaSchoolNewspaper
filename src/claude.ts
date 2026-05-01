@@ -12,15 +12,9 @@ Important guidelines:
 - Keep replies concise and helpful
 - Be friendly and respectful at all times`;
 
-type Part = { text: string };
-type Content = { role: 'user' | 'model'; parts: Part[] };
+type Message = { role: 'user' | 'assistant'; content: string };
 
-const SYSTEM_PREFIX: Content[] = [
-  { role: 'user', parts: [{ text: SYSTEM_PROMPT }] },
-  { role: 'model', parts: [{ text: 'Understood. I will follow these instructions.' }] },
-];
-
-const histories = new Map<string, Content[]>();
+const histories = new Map<string, Message[]>();
 
 export function clearHistory(chatId: string): void {
   histories.delete(chatId);
@@ -29,32 +23,41 @@ export function clearHistory(chatId: string): void {
 export async function getAIResponse(chatId: string, userMessage: string): Promise<string> {
   const history = histories.get(chatId) ?? [];
 
-  const contents: Content[] = [
-    ...SYSTEM_PREFIX,
+  const messages: Message[] = [
     ...history,
-    { role: 'user', parts: [{ text: userMessage }] },
+    { role: 'user', content: userMessage },
   ];
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.geminiApiKey}`;
-
-  const response = await fetch(url, {
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents }),
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.groqApiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...messages,
+      ],
+      max_tokens: 1024,
+    }),
   });
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Gemini ${response.status}: ${err}`);
+    throw new Error(`Groq ${response.status}: ${err}`);
   }
 
-  const data = await response.json() as { candidates: Array<{ content: Content }> };
-  const reply = data.candidates[0].content.parts.map(p => p.text).join('');
+  const data = await response.json() as {
+    choices: Array<{ message: { content: string } }>;
+  };
+  const reply = data.choices[0].message.content;
 
-  contents.push({ role: 'model', parts: [{ text: reply }] });
+  messages.push({ role: 'assistant', content: reply });
 
   const maxMessages = config.maxHistoryPairs * 2;
-  histories.set(chatId, contents.length > maxMessages ? contents.slice(-maxMessages) : contents);
+  histories.set(chatId, messages.length > maxMessages ? messages.slice(-maxMessages) : messages);
 
   return reply;
 }

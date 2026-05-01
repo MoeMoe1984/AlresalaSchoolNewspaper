@@ -1,8 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error('GEMINI_API_KEY is required. Run setup.sh to configure it.');
+if (!process.env.GROQ_API_KEY) {
+  throw new Error('GROQ_API_KEY is required. Run setup.sh to configure it.');
 }
 
 const allowedNumbers = process.env.ALLOWED_NUMBERS
@@ -10,8 +10,8 @@ const allowedNumbers = process.env.ALLOWED_NUMBERS
   : [];
 
 export const config = {
-  geminiApiKey: process.env.GEMINI_API_KEY,
-  model: 'gemini-pro' as const,
+  groqApiKey: process.env.GROQ_API_KEY,
+  model: 'llama-3.1-8b-instant' as const,
   maxHistoryPairs: 10,
   allowedNumbers,
 };

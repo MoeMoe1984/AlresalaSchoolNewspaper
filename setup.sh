@@ -67,11 +67,11 @@ echo ""
 echo -e "${YELLOW}[3/4] Setting up environment...${NC}"
 
 if [ -f ".env" ]; then
-  if grep -q "GEMINI_API_KEY" .env 2>/dev/null && ! grep -q "GEMINI_API_KEY=$" .env 2>/dev/null; then
+  if grep -q "GROQ_API_KEY" .env 2>/dev/null && ! grep -q "GROQ_API_KEY=$" .env 2>/dev/null; then
     echo -e "${GREEN}✅  .env already configured${NC}"
     ASK_KEY=false
   else
-    echo -e "${YELLOW}⚠️   .env exists but Gemini key is missing.${NC}"
+    echo -e "${YELLOW}⚠️   .env exists but Groq key is missing.${NC}"
     ASK_KEY=true
   fi
 else
@@ -80,15 +80,15 @@ fi
 
 if [ "$ASK_KEY" = true ]; then
   echo ""
-  echo "  You need a Google Gemini API key (free):"
-  echo "  1. Go to  https://aistudio.google.com/apikey"
-  echo "  2. Sign in with your Google account"
-  echo "  3. Click 'Create API Key'"
-  echo "  4. Copy the key"
+  echo "  You need a Groq API key (free, no regional restrictions):"
+  echo "  1. Go to  https://console.groq.com"
+  echo "  2. Sign up with Google"
+  echo "  3. Click 'API Keys' -> 'Create API Key'"
+  echo "  4. Copy the key (starts with gsk_...)"
   echo ""
 
   while true; do
-    read -rp "  Paste your Gemini API key: " API_KEY
+    read -rp "  Paste your Groq API key: " API_KEY
     if [ -z "$API_KEY" ]; then
       echo "  Key cannot be empty. Try again."
     else
@@ -97,7 +97,7 @@ if [ "$ASK_KEY" = true ]; then
   done
 
   {
-    echo "GEMINI_API_KEY=$API_KEY"
+    echo "GROQ_API_KEY=$API_KEY"
     echo ""
     echo "# Optional: restrict replies to specific numbers (comma-separated)"
     echo "# Format: countrycode+number@c.us  e.g.  9665XXXXXXXX@c.us"
