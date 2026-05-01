@@ -11,7 +11,7 @@ const allowedNumbers = process.env.ALLOWED_NUMBERS
 
 export const config = {
   geminiApiKey: process.env.GEMINI_API_KEY,
-  model: 'gemini-2.0-flash' as const,
+  model: 'gemini-1.5-flash' as const,
   maxHistoryPairs: 10,
   allowedNumbers,
 };
