@@ -1,7 +1,7 @@
 import { startBot } from './bot';
 
-console.log('🗞️  Starting Alresala School Newspaper WhatsApp Bot...');
-console.log('   Powered by Claude AI\n');
+console.log('🤖 Starting Personal WhatsApp AI Assistant...');
+console.log('   Powered by Google Gemini\n');
 
 startBot().catch(err => {
   console.error('Fatal error:', err);

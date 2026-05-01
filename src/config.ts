@@ -1,8 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  throw new Error('ANTHROPIC_API_KEY is required. Copy .env.example to .env and fill it in.');
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error('GEMINI_API_KEY is required. Run setup.sh to configure it.');
 }
 
 const allowedNumbers = process.env.ALLOWED_NUMBERS
@@ -10,11 +10,8 @@ const allowedNumbers = process.env.ALLOWED_NUMBERS
   : [];
 
 export const config = {
-  anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-  model: 'claude-opus-4-7' as const,
-  maxTokens: 1024,
-  // How many user+assistant pairs to keep per chat before trimming
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  model: 'gemini-2.0-flash' as const,
   maxHistoryPairs: 10,
-  // Restrict replies to specific numbers (empty = reply to all)
   allowedNumbers,
 };

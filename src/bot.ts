@@ -10,16 +10,13 @@ import pino from 'pino';
 import { clearHistory, getAIResponse } from './claude';
 import { config } from './config';
 
-const HELP_TEXT = `🗞️ *Alresala School Newspaper Bot*
+const HELP_TEXT = `🤖 *Personal AI Assistant*
 
 Commands:
 • !help — Show this message
 • !clear — Reset conversation history
 
 Just send any message and I will reply!
-
----
-جريدة الرسالة المدرسية 📰
 أرسل أي رسالة وسأرد عليك!`;
 
 function isAllowed(jid: string): boolean {

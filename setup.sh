@@ -67,13 +67,12 @@ echo ""
 echo -e "${YELLOW}[3/4] Setting up environment...${NC}"
 
 if [ -f ".env" ]; then
-  # Verify the key is not the placeholder
-  if grep -q "your_anthropic_api_key_here" .env 2>/dev/null; then
-    echo -e "${YELLOW}⚠️   .env exists but still has the placeholder key.${NC}"
-    ASK_KEY=true
-  else
+  if grep -q "GEMINI_API_KEY" .env 2>/dev/null && ! grep -q "GEMINI_API_KEY=$" .env 2>/dev/null; then
     echo -e "${GREEN}✅  .env already configured${NC}"
     ASK_KEY=false
+  else
+    echo -e "${YELLOW}⚠️   .env exists but Gemini key is missing.${NC}"
+    ASK_KEY=true
   fi
 else
   ASK_KEY=true
@@ -81,26 +80,24 @@ fi
 
 if [ "$ASK_KEY" = true ]; then
   echo ""
-  echo "  You need an Anthropic API key (free to get):"
-  echo "  1. Go to  https://console.anthropic.com"
-  echo "  2. Sign up / log in"
-  echo "  3. Click 'API Keys' → 'Create Key'"
-  echo "  4. Copy the key that starts with  sk-ant-..."
+  echo "  You need a Google Gemini API key (free):"
+  echo "  1. Go to  https://aistudio.google.com/apikey"
+  echo "  2. Sign in with your Google account"
+  echo "  3. Click 'Create API Key'"
+  echo "  4. Copy the key"
   echo ""
 
   while true; do
-    read -rp "  Paste your Anthropic API key: " API_KEY
+    read -rp "  Paste your Gemini API key: " API_KEY
     if [ -z "$API_KEY" ]; then
       echo "  Key cannot be empty. Try again."
-    elif [[ "$API_KEY" != sk-ant-* ]]; then
-      echo "  That doesn't look right (should start with sk-ant-). Try again."
     else
       break
     fi
   done
 
   {
-    echo "ANTHROPIC_API_KEY=$API_KEY"
+    echo "GEMINI_API_KEY=$API_KEY"
     echo ""
     echo "# Optional: restrict replies to specific numbers (comma-separated)"
     echo "# Format: countrycode+number@c.us  e.g.  9665XXXXXXXX@c.us"
