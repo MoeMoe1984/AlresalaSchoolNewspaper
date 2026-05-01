@@ -35,7 +35,7 @@ export async function getAIResponse(chatId: string, userMessage: string): Promis
     { role: 'user', parts: [{ text: userMessage }] },
   ];
 
-  const url = `https://generativelanguage.googleapis.com/v1/models/${config.model}:generateContent?key=${config.geminiApiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.geminiApiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
