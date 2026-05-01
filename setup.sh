@@ -13,6 +13,16 @@ echo -e "${BOLD}${BLUE}🗞️  Alresala School Newspaper — WhatsApp Bot${NC}"
 echo -e "${BLUE}============================================${NC}"
 echo ""
 
+# ── Step 0: Termux bootstrap (Android only) ─────────────────────────────────
+
+if [ -d "/data/data/com.termux" ] || [ -n "$TERMUX_VERSION" ]; then
+  echo -e "${YELLOW}[0/4] Termux detected — installing native build tools...${NC}"
+  pkg update -y
+  pkg install -y nodejs-lts git python make clang
+  echo -e "${GREEN}✅  Build tools installed${NC}"
+  echo ""
+fi
+
 # ── Step 1: Node.js ─────────────────────────────────────────────────────────
 
 echo -e "${YELLOW}[1/4] Checking Node.js...${NC}"
@@ -113,7 +123,7 @@ echo -e "   1. Open ${BOLD}WhatsApp${NC}"
 echo -e "   2. Tap  ⋮  →  ${BOLD}Linked Devices${NC}  →  ${BOLD}Link a Device${NC}"
 echo -e "   3. Scan the QR code below"
 echo ""
-echo -e "  The session is saved — you only scan ${BOLD}once${NC}."
+echo -e "  The session is saved in ${BOLD}.baileys_auth/${NC} — you only scan ${BOLD}once${NC}."
 echo -e "  Press  ${BOLD}Ctrl+C${NC}  to stop the bot."
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""

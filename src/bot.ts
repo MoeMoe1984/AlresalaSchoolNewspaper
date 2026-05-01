@@ -1,5 +1,12 @@
 import qrcode from 'qrcode-terminal';
-import { Client, LocalAuth, Message } from 'whatsapp-web.js';
+import makeWASocket, {
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  useMultiFileAuthState,
+  WAMessage,
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import pino from 'pino';
 import { clearHistory, getAIResponse } from './claude';
 import { config } from './config';
 
@@ -15,86 +22,95 @@ Just send any message and I will reply!
 جريدة الرسالة المدرسية 📰
 أرسل أي رسالة وسأرد عليك!`;
 
-export function createClient(): Client {
-  return new Client({
-    authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-    puppeteer: {
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
-  });
-}
-
-function isAllowed(from: string): boolean {
+function isAllowed(jid: string): boolean {
   if (config.allowedNumbers.length === 0) return true;
-  return config.allowedNumbers.some(n => from.startsWith(n));
+  return config.allowedNumbers.some(n => jid.startsWith(n));
 }
 
-async function handleMessage(message: Message): Promise<void> {
-  // Skip messages sent by the bot itself
-  if (message.fromMe) return;
-  // Skip broadcast / status messages
-  if (message.isStatus) return;
-
-  const from = message.from;
-
-  if (!isAllowed(from)) return;
-
-  const body = message.body.trim();
-  if (!body) return;
-
-  // Built-in commands
-  if (body.toLowerCase() === '!help') {
-    await message.reply(HELP_TEXT);
-    return;
-  }
-
-  if (body.toLowerCase() === '!clear') {
-    clearHistory(from);
-    await message.reply('✅ Conversation history cleared!\nتم مسح سجل المحادثة!');
-    return;
-  }
-
-  try {
-    const chat = await message.getChat();
-    await chat.sendStateTyping();
-
-    const reply = await getAIResponse(from, body);
-    await message.reply(reply);
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error for ${from}:`, error);
-    await message.reply('Sorry, something went wrong. Please try again.\nعذراً، حدث خطأ. يرجى المحاولة مرة أخرى.');
-  }
+function getTextFromMessage(msg: WAMessage): string | null {
+  const content = msg.message;
+  if (!content) return null;
+  return (
+    content.conversation ??
+    content.extendedTextMessage?.text ??
+    content.imageMessage?.caption ??
+    null
+  );
 }
 
-export function startBot(client: Client): void {
-  client.on('qr', (qr) => {
-    console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
-    qrcode.generate(qr, { small: true });
-    console.log('\nWaiting for scan...\n');
+export async function startBot(): Promise<void> {
+  const { version } = await fetchLatestBaileysVersion();
+  const { state, saveCreds } = await useMultiFileAuthState('.baileys_auth');
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
   });
 
-  client.on('authenticated', () => {
-    console.log('🔐 Authenticated — session saved.');
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', ({ qr, connection, lastDisconnect }) => {
+    if (qr) {
+      console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
+      qrcode.generate(qr, { small: true });
+      console.log('\nWaiting for scan...\n');
+    }
+
+    if (connection === 'close') {
+      const shouldReconnect =
+        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      if (shouldReconnect) {
+        console.log('🔄 Reconnecting...');
+        startBot();
+      } else {
+        console.log('❌ Logged out. Delete .baileys_auth/ and restart to re-scan QR.');
+      }
+    }
+
+    if (connection === 'open') {
+      console.log('✅ Bot is ready and listening for messages!\n');
+    }
   });
 
-  client.on('auth_failure', (msg) => {
-    console.error('❌ Authentication failed:', msg);
-    process.exit(1);
-  });
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
 
-  client.on('ready', () => {
-    console.log('✅ Bot is ready and listening for messages!\n');
-  });
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;
+      if (!msg.key.remoteJid) continue;
 
-  client.on('disconnected', (reason) => {
-    console.warn('⚠️  Disconnected:', reason);
-  });
+      const from = msg.key.remoteJid;
 
-  client.on('message', (msg: Message) => {
-    handleMessage(msg).catch(err =>
-      console.error('Unhandled message error:', err),
-    );
-  });
+      if (!isAllowed(from)) continue;
 
-  client.initialize();
+      const body = getTextFromMessage(msg)?.trim();
+      if (!body) continue;
+
+      if (body.toLowerCase() === '!help') {
+        await sock.sendMessage(from, { text: HELP_TEXT });
+        continue;
+      }
+
+      if (body.toLowerCase() === '!clear') {
+        clearHistory(from);
+        await sock.sendMessage(from, {
+          text: '✅ Conversation history cleared!\nتم مسح سجل المحادثة!',
+        });
+        continue;
+      }
+
+      try {
+        await sock.sendPresenceUpdate('composing', from);
+        const reply = await getAIResponse(from, body);
+        await sock.sendMessage(from, { text: reply });
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error for ${from}:`, error);
+        await sock.sendMessage(from, {
+          text: 'Sorry, something went wrong. Please try again.\nعذراً، حدث خطأ. يرجى المحاولة مرة أخرى.',
+        });
+      }
+    }
+  });
 }
