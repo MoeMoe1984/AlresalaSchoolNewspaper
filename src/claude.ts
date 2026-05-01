@@ -1,7 +1,4 @@
-import { GoogleGenerativeAI, Content } from '@google/generative-ai';
 import { config } from './config';
-
-const genAI = new GoogleGenerativeAI(config.geminiApiKey);
 
 const SYSTEM_PROMPT = `You are a helpful personal AI assistant. You help with:
 
@@ -15,6 +12,9 @@ Important guidelines:
 - Keep replies concise and helpful
 - Be friendly and respectful at all times`;
 
+type Part = { text: string };
+type Content = { role: 'user' | 'model'; parts: Part[] };
+
 const histories = new Map<string, Content[]>();
 
 export function clearHistory(chatId: string): void {
@@ -24,25 +24,34 @@ export function clearHistory(chatId: string): void {
 export async function getAIResponse(chatId: string, userMessage: string): Promise<string> {
   const history = histories.get(chatId) ?? [];
 
-  const model = genAI.getGenerativeModel({
-    model: config.model,
-    systemInstruction: SYSTEM_PROMPT,
+  const contents: Content[] = [
+    ...history,
+    { role: 'user', parts: [{ text: userMessage }] },
+  ];
+
+  const url = `https://generativelanguage.googleapis.com/v1/models/${config.model}:generateContent?key=${config.geminiApiKey}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents,
+    }),
   });
 
-  const chat = model.startChat({ history });
-  const result = await chat.sendMessage(userMessage);
-  const reply = result.response.text();
-
-  history.push(
-    { role: 'user', parts: [{ text: userMessage }] },
-    { role: 'model', parts: [{ text: reply }] },
-  );
-
-  const maxMessages = config.maxHistoryPairs * 2;
-  if (history.length > maxMessages) {
-    history.splice(0, history.length - maxMessages);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gemini ${response.status}: ${err}`);
   }
 
-  histories.set(chatId, history);
+  const data = await response.json() as { candidates: Array<{ content: Content }> };
+  const reply = data.candidates[0].content.parts.map(p => p.text).join('');
+
+  contents.push({ role: 'model', parts: [{ text: reply }] });
+
+  const maxMessages = config.maxHistoryPairs * 2;
+  histories.set(chatId, contents.length > maxMessages ? contents.slice(-maxMessages) : contents);
+
   return reply;
 }
