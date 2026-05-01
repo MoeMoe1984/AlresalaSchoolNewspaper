@@ -10,14 +10,17 @@ import pino from 'pino';
 import { clearHistory, getAIResponse } from './claude';
 import { config } from './config';
 
-const HELP_TEXT = `🤖 *Personal AI Assistant*
+const HELP_TEXT = `🤖 *AI Assistant of Dr. Mohamed Ali*
 
+Just send your message and the assistant will respond.
 Commands:
-• !help — Show this message
 • !clear — Reset conversation history
 
-Just send any message and I will reply!
-أرسل أي رسالة وسأرد عليك!`;
+---
+🤖 *المساعد الذكي للدكتور محمد علي*
+
+أرسل رسالتك وسيرد عليك المساعد.
+• !clear — مسح سجل المحادثة`;
 
 function isAllowed(jid: string): boolean {
   if (config.allowedNumbers.length === 0) return true;
