@@ -15,6 +15,11 @@ Important guidelines:
 type Part = { text: string };
 type Content = { role: 'user' | 'model'; parts: Part[] };
 
+const SYSTEM_PREFIX: Content[] = [
+  { role: 'user', parts: [{ text: SYSTEM_PROMPT }] },
+  { role: 'model', parts: [{ text: 'Understood. I will follow these instructions.' }] },
+];
+
 const histories = new Map<string, Content[]>();
 
 export function clearHistory(chatId: string): void {
@@ -25,6 +30,7 @@ export async function getAIResponse(chatId: string, userMessage: string): Promis
   const history = histories.get(chatId) ?? [];
 
   const contents: Content[] = [
+    ...SYSTEM_PREFIX,
     ...history,
     { role: 'user', parts: [{ text: userMessage }] },
   ];
@@ -34,10 +40,7 @@ export async function getAIResponse(chatId: string, userMessage: string): Promis
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents,
-    }),
+    body: JSON.stringify({ contents }),
   });
 
   if (!response.ok) {
