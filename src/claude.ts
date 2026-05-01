@@ -35,7 +35,7 @@ export async function getAIResponse(chatId: string, userMessage: string): Promis
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
       contents,
     }),
   });
