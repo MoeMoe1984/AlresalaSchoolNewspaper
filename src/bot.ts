@@ -222,6 +222,39 @@ export async function startBot(): Promise<void> {
       const from = msg.key.remoteJid;
       if (!isAllowed(from)) continue;
 
+      // Handle poll vote messages (pollUpdateMessage has no text)
+      const pollUpd = msg.message?.pollUpdateMessage;
+      if (pollUpd) {
+        const origId = pollUpd.pollCreationMessageKey?.id;
+        console.log('[upsert pollUpdateMessage] from:', from, 'origPollId:', origId, 'inStore:', pollStore.has(origId ?? ''));
+        if (origId) {
+          const origPoll = pollStore.get(origId);
+          if (origPoll?.message) {
+            try {
+              const result = getAggregateVotesInPollMessage({
+                message: origPoll.message,
+                pollUpdates: [{
+                  pollUpdateMessageKey: msg.key,
+                  vote: pollUpd.vote ?? null,
+                  senderTimestampMs: pollUpd.senderTimestampMs ?? null,
+                }],
+              });
+              console.log('[upsert poll result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
+              const selected = result.find(r => r.voters.length > 0)?.name;
+              if (selected) {
+                console.log(`[upsert poll vote] ${from} → "${selected}"`);
+                await handlePollVote(sock, from, selected);
+              }
+            } catch (err) {
+              console.error('[upsert pollUpdateMessage error]', err);
+            }
+          } else {
+            console.log('[upsert pollUpdateMessage] Original poll not found for id:', origId);
+          }
+        }
+        continue;
+      }
+
       const text =
         msg.message?.conversation ??
         msg.message?.extendedTextMessage?.text ??
@@ -256,6 +289,7 @@ export async function startBot(): Promise<void> {
           pollUpdates: update.pollUpdates,
         });
 
+        console.log('[messages.update poll result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
         const selected = result.find(r => r.voters.length > 0)?.name;
         if (selected) {
           console.log(`[Poll vote] ${key.remoteJid} → "${selected}"`);
