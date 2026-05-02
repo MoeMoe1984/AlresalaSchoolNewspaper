@@ -233,9 +233,10 @@ export async function startBot(): Promise<void> {
             try {
               const result = getAggregateVotesInPollMessage({
                 message: origPoll.message,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 pollUpdates: [{
                   pollUpdateMessageKey: msg.key,
-                  vote: pollUpd.vote ?? null,
+                  vote: pollUpd.vote as any,
                   senderTimestampMs: pollUpd.senderTimestampMs ?? null,
                 }],
               });
