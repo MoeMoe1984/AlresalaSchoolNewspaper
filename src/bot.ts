@@ -104,12 +104,23 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
       const p1 = await sock.sendMessage(from, {
         poll: { name: 'Select an option / اختر خياراً', values: PURPOSE_OPTIONS, selectableCount: 1 },
       });
-      if (p1?.key.id) pollStore.set(p1.key.id, p1);
+      if (p1?.key.id) {
+        pollStore.set(p1.key.id, p1);
+        console.log('[Poll stored]', p1.key.id, '| store size:', pollStore.size);
+      }
       break;
     }
 
     case 'awaiting_purpose':
+      if (text === '1') { await handlePollVote(sock, from, 'Personal'); return; }
+      if (text === '2') { await handlePollVote(sock, from, 'Business'); return; }
+      await sock.sendMessage(from, { text: t('pleaseVote', conv.lang) });
+      break;
+
     case 'awaiting_business_option':
+      if (text === '1') { await handlePollVote(sock, from, 'Schedule'); return; }
+      if (text === '2') { await handlePollVote(sock, from, 'email'); return; }
+      if (text === '3') { await handlePollVote(sock, from, 'message'); return; }
       await sock.sendMessage(from, { text: t('pleaseVote', conv.lang) });
       break;
 
@@ -229,12 +240,16 @@ export async function startBot(): Promise<void> {
 
   sock.ev.on('messages.update', async (updates) => {
     for (const { key, update } of updates) {
+      console.log('[messages.update] id:', key.id, 'hasPollUpdates:', !!update.pollUpdates, 'inStore:', pollStore.has(key.id ?? ''));
       if (!update.pollUpdates || !key.id || !key.remoteJid) continue;
       if (key.remoteJid.endsWith('@g.us')) continue;
 
       try {
         const pollMsg = pollStore.get(key.id);
-        if (!pollMsg?.message) continue;
+        if (!pollMsg?.message) {
+          console.log('[Poll] Message not found in store for id:', key.id);
+          continue;
+        }
 
         const result = getAggregateVotesInPollMessage({
           message: pollMsg.message,
