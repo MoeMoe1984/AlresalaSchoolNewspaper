@@ -247,7 +247,7 @@ export async function startBot(): Promise<void> {
 
       try {
         const result = getAggregateVotesInPollMessage({
-          message: pollMsg,
+          message: pollMsg.message!,
           pollUpdates: update.pollUpdates,
         });
         const selected = result.find(r => r.voters.length > 0)?.name;
