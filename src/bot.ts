@@ -117,9 +117,19 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
       if (p1?.key.id) {
         pollStore.set(p1.key.id, p1);
         pollByJid.set(from, p1);
+        // Dump every field of pollCreationMessage* and messageContextInfo to find the key material
         const pm1 = p1.message as any;
-        const poll1 = pm1?.pollCreationMessage ?? pm1?.pollCreationMessageV2 ?? pm1?.pollCreationMessageV3;
-        console.log('[Poll stored] id:', p1.key.id, '| msgKeys:', Object.keys(pm1 ?? {}).join(','), '| encKey:', poll1?.encKey ? 'OK' : 'MISSING');
+        const dumpFields = (label: string, obj: any) => {
+          if (!obj) { console.log(label, 'null'); return; }
+          for (const [k, v] of Object.entries(obj)) {
+            if (v instanceof Uint8Array) console.log(`${label}.${k}`, `Uint8Array(${v.length})`);
+            else if (v != null && typeof v === 'object' && !Array.isArray(v)) console.log(`${label}.${k}`, `{${Object.keys(v).join(',')}}`);
+            else console.log(`${label}.${k}`, v);
+          }
+        };
+        console.log('[Poll msg keys]', Object.keys(pm1 ?? {}).join(', '));
+        dumpFields('[pc]', pm1?.pollCreationMessage ?? pm1?.pollCreationMessageV2 ?? pm1?.pollCreationMessageV3);
+        dumpFields('[mc]', pm1?.messageContextInfo);
       }
       break;
     }
@@ -269,7 +279,8 @@ export async function startBot(): Promise<void> {
       if (pollUpd) {
         const origId = pollUpd.pollCreationMessageKey?.id;
         const origPoll = (origId ? pollStore.get(origId) : undefined) ?? pollByJid.get(from);
-        console.log('[upsert pollUpdateMessage] from:', from, 'origPollId:', origId, 'foundPoll:', !!origPoll);
+        const selCount = (pollUpd.vote as any)?.selectedOptions?.length ?? 0;
+        console.log('[upsert pollUpdateMessage] from:', from, 'origPollId:', origId, 'foundPoll:', !!origPoll, 'selectedOptions:', selCount);
         if (origPoll?.message) {
           try {
             const result = getAggregateVotesInPollMessage({
