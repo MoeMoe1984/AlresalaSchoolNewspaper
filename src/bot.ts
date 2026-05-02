@@ -2,21 +2,22 @@ import qrcode from 'qrcode-terminal';
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  getAggregateVotesInPollMessage,
   useMultiFileAuthState,
   WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
+import { createHmac } from 'crypto';
 import pino from 'pino';
 import { config } from './config';
 
 const EMAIL = 'Mohamed.ali@altron.com';
 const logger = pino({ level: 'silent' });
 
-// Stores sent poll messages keyed by message ID — never overwritten by incoming events
-const pollStore = new Map<string, WAMessage>();
-// Fallback: latest poll per JID (handles server-side ID remapping)
-const pollByJid = new Map<string, WAMessage>();
+// Poll message store (keyed by message ID and by JID)
+const pollStore    = new Map<string, WAMessage>();
+const pollByJid    = new Map<string, WAMessage>();
+// messageContextInfo.messageSecret — the actual HMAC key Baileys uses for polls
+const pollKeyStore = new Map<string, Uint8Array>();
 
 // ── Dubai time ───────────────────────────────────────────────────────────────
 
@@ -78,6 +79,35 @@ const BUSINESS_OPTIONS = [
   '✉️ Leave a message / ترك رسالة',
 ];
 
+// ── Poll vote decoder ─────────────────────────────────────────────────────────
+
+// WhatsApp encodes each selected option as HMAC-SHA256(messageSecret, optionName).
+function findVotedOption(
+  selectedHashes: Uint8Array[],
+  options: string[],
+  secret: Uint8Array,
+): string | undefined {
+  for (const option of options) {
+    const expected = createHmac('sha256', Buffer.from(secret))
+      .update(Buffer.from(option))
+      .digest();
+    if (selectedHashes.some(
+      h => h.length === expected.length && h.every((b, i) => b === expected[i]),
+    )) return option;
+  }
+  return undefined;
+}
+
+// ── Poll storage helper ───────────────────────────────────────────────────────
+
+function storePoll(id: string, jid: string, msg: WAMessage) {
+  pollStore.set(id, msg);
+  pollByJid.set(jid, msg);
+  const secret = (msg.message as any)?.messageContextInfo?.messageSecret as Uint8Array | undefined;
+  if (secret?.length) pollKeyStore.set(id, secret);
+  console.log('[Poll stored] id:', id, '| secret:', secret?.length === 32 ? 'OK' : 'MISSING');
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 type Sock = ReturnType<typeof makeWASocket>;
@@ -99,14 +129,6 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
     return;
   }
 
-  if (text.toLowerCase() === '!debug') {
-    const ids = [...pollStore.keys()].map(k => k.slice(-8)).join(', ') || 'empty';
-    const jids = [...pollByJid.keys()].map(k => k.slice(-8)).join(', ') || 'empty';
-    const state = getConv(from).step;
-    await sock.sendMessage(from, { text: `step: ${state}\npollStore IDs: ${ids}\npollByJid: ${jids}` });
-    return;
-  }
-
   switch (conv.step) {
     case 'idle': {
       convs.set(from, { step: 'awaiting_purpose', lang });
@@ -114,23 +136,7 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
       const p1 = await sock.sendMessage(from, {
         poll: { name: 'Select an option / اختر خياراً', values: PURPOSE_OPTIONS, selectableCount: 1 },
       });
-      if (p1?.key.id) {
-        pollStore.set(p1.key.id, p1);
-        pollByJid.set(from, p1);
-        // Dump every field of pollCreationMessage* and messageContextInfo to find the key material
-        const pm1 = p1.message as any;
-        const dumpFields = (label: string, obj: any) => {
-          if (!obj) { console.log(label, 'null'); return; }
-          for (const [k, v] of Object.entries(obj)) {
-            if (v instanceof Uint8Array) console.log(`${label}.${k}`, `Uint8Array(${v.length})`);
-            else if (v != null && typeof v === 'object' && !Array.isArray(v)) console.log(`${label}.${k}`, `{${Object.keys(v).join(',')}}`);
-            else console.log(`${label}.${k}`, v);
-          }
-        };
-        console.log('[Poll msg keys]', Object.keys(pm1 ?? {}).join(', '));
-        dumpFields('[pc]', pm1?.pollCreationMessage ?? pm1?.pollCreationMessageV2 ?? pm1?.pollCreationMessageV3);
-        dumpFields('[mc]', pm1?.messageContextInfo);
-      }
+      if (p1?.key.id) storePoll(p1.key.id, from, p1);
       break;
     }
 
@@ -180,13 +186,7 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
       const p2 = await sock.sendMessage(from, {
         poll: { name: t('businessQ', lang), values: BUSINESS_OPTIONS, selectableCount: 1 },
       });
-      if (p2?.key.id) {
-        pollStore.set(p2.key.id, p2);
-        pollByJid.set(from, p2);
-        const pm2 = p2.message as any;
-        const poll2 = pm2?.pollCreationMessage ?? pm2?.pollCreationMessageV2 ?? pm2?.pollCreationMessageV3;
-        console.log('[Poll2 stored] id:', p2.key.id, '| encKey:', poll2?.encKey ? 'OK' : 'MISSING');
-      }
+      if (p2?.key.id) storePoll(p2.key.id, from, p2);
       convs.set(from, { step: 'awaiting_business_option', lang });
       return;
     }
@@ -242,25 +242,13 @@ export async function startBot(): Promise<void> {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // Log all events including non-notify to spot poll votes arriving on unexpected types
-    for (const msg of messages) {
-      const msgTypes = Object.keys(msg.message ?? {}).join(',');
-      console.log(`[upsert type=${type}] fromMe=${msg.key.fromMe} jid=${msg.key.remoteJid?.slice(-10)} types=${msgTypes || 'none'}`);
-    }
-
-    // Intercept bot's own sent poll messages (echo) to capture the encKey.
-    // sendMessage() returns the message before Baileys finalises it;
-    // the upsert echo contains the complete proto including encKey.
+    // Capture bot's own sent poll echoes to update pollStore with complete message
     if (type === 'append' || type === 'notify') {
       for (const msg of messages) {
-        if (!msg.key.fromMe || !msg.key.id || !msg.message) continue;
+        if (!msg.key.fromMe || !msg.key.id || !msg.message || !msg.key.remoteJid) continue;
         const m = msg.message as any;
-        const pollMsg = m.pollCreationMessage ?? m.pollCreationMessageV2 ?? m.pollCreationMessageV3;
-        if (pollMsg) {
-          const hasKey = !!(pollMsg.encKey);
-          pollStore.set(msg.key.id, msg);
-          if (msg.key.remoteJid) pollByJid.set(msg.key.remoteJid, msg);
-          console.log('[Poll echo] id:', msg.key.id, '| encKey:', hasKey ? 'OK' : 'still missing');
+        if (m.pollCreationMessage || m.pollCreationMessageV2 || m.pollCreationMessageV3) {
+          storePoll(msg.key.id, msg.key.remoteJid, msg);
         }
       }
     }
@@ -274,41 +262,44 @@ export async function startBot(): Promise<void> {
       const from = msg.key.remoteJid;
       if (!isAllowed(from)) continue;
 
-      // Handle poll vote messages (no text; may arrive fromMe or not)
+      // ── Poll vote ──────────────────────────────────────────────────────────
       const pollUpd = msg.message?.pollUpdateMessage;
       if (pollUpd) {
         const origId = pollUpd.pollCreationMessageKey?.id;
-        const origPoll = (origId ? pollStore.get(origId) : undefined) ?? pollByJid.get(from);
-        const selCount = (pollUpd.vote as any)?.selectedOptions?.length ?? 0;
-        console.log('[upsert pollUpdateMessage] from:', from, 'origPollId:', origId, 'foundPoll:', !!origPoll, 'selectedOptions:', selCount);
-        if (origPoll?.message) {
-          try {
-            const result = getAggregateVotesInPollMessage({
-              message: origPoll.message,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              pollUpdates: [{
-                pollUpdateMessageKey: msg.key,
-                vote: pollUpd.vote as any,
-                senderTimestampMs: pollUpd.senderTimestampMs ?? null,
-              }],
-            });
-            console.log('[upsert poll result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
-            const selected = result.find(r => r.voters.length > 0)?.name;
-            if (selected) {
-              console.log(`[upsert poll vote] ${from} → "${selected}"`);
-              await handlePollVote(sock, from, selected);
-            } else {
-              console.log('[upsert poll] decryption returned no winner — encKey may be missing');
-            }
-          } catch (err) {
-            console.error('[upsert pollUpdateMessage error]', err);
-          }
+        const selectedHashes: Uint8Array[] = (pollUpd.vote as any)?.selectedOptions ?? [];
+
+        console.log('[vote] from:', from, 'origId:', origId, 'selected:', selectedHashes.length);
+
+        if (selectedHashes.length === 0) {
+          // User deselected — ignore
+          continue;
+        }
+
+        // Resolve the secret: by poll ID first, then by JID fallback
+        const secret: Uint8Array | undefined =
+          (origId ? pollKeyStore.get(origId) : undefined) ??
+          (origId ? ((pollStore.get(origId)?.message as any)?.messageContextInfo?.messageSecret) : undefined) ??
+          ((pollByJid.get(from)?.message as any)?.messageContextInfo?.messageSecret);
+
+        if (!secret?.length) {
+          console.log('[vote] no messageSecret found for poll');
+          continue;
+        }
+
+        const conv = getConv(from);
+        const options = conv.step === 'awaiting_purpose' ? PURPOSE_OPTIONS : BUSINESS_OPTIONS;
+        const selected = findVotedOption(selectedHashes, options, secret);
+
+        if (selected) {
+          console.log(`[vote] ${from} → "${selected}"`);
+          await handlePollVote(sock, from, selected);
         } else {
-          console.log('[upsert pollUpdateMessage] No matching poll in store');
+          console.log('[vote] HMAC matched no option — wrong step or wrong key');
         }
         continue;
       }
 
+      // ── Text message ───────────────────────────────────────────────────────
       if (msg.key.fromMe) continue;
 
       const text =
@@ -323,38 +314,6 @@ export async function startBot(): Promise<void> {
         await handleText(sock, from, text.trim());
       } catch (err) {
         console.error(`[${new Date().toISOString()}] Error for ${from}:`, err);
-      }
-    }
-  });
-
-  sock.ev.on('messages.update', async (updates) => {
-    for (const { key, update } of updates) {
-      console.log('[messages.update] id:', key.id, 'hasPollUpdates:', !!update.pollUpdates, 'inStore:', pollStore.has(key.id ?? ''));
-      if (!update.pollUpdates || !key.id || !key.remoteJid) continue;
-      if (key.remoteJid.endsWith('@g.us')) continue;
-
-      try {
-        const pollMsg = pollStore.get(key.id) ?? pollByJid.get(key.remoteJid);
-        if (!pollMsg?.message) {
-          console.log('[messages.update] No poll found by id or jid for:', key.id);
-          continue;
-        }
-
-        const result = getAggregateVotesInPollMessage({
-          message: pollMsg.message,
-          pollUpdates: update.pollUpdates,
-        });
-
-        console.log('[messages.update poll result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
-        const selected = result.find(r => r.voters.length > 0)?.name;
-        if (selected) {
-          console.log(`[Poll vote] ${key.remoteJid} → "${selected}"`);
-          await handlePollVote(sock, key.remoteJid, selected);
-        } else {
-          console.log('[messages.update] decryption returned no winner — encKey may be missing');
-        }
-      } catch (err) {
-        console.error(`[${new Date().toISOString()}] Poll error:`, err);
       }
     }
   });
