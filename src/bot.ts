@@ -3,8 +3,8 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   getAggregateVotesInPollMessage,
-  makeInMemoryStore,
   useMultiFileAuthState,
+  WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -12,6 +12,9 @@ import { config } from './config';
 
 const EMAIL = 'Mohamed.ali@altron.com';
 const logger = pino({ level: 'silent' });
+
+// Stores sent poll messages keyed by message ID — never overwritten by incoming events
+const pollStore = new Map<string, WAMessage>();
 
 // ── Dubai time ───────────────────────────────────────────────────────────────
 
@@ -98,9 +101,10 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
     case 'idle': {
       convs.set(from, { step: 'awaiting_purpose', lang });
       await sock.sendMessage(from, { text: t('greeting', lang) });
-      await sock.sendMessage(from, {
+      const p1 = await sock.sendMessage(from, {
         poll: { name: 'Select an option / اختر خياراً', values: PURPOSE_OPTIONS, selectableCount: 1 },
       });
+      if (p1?.key.id) pollStore.set(p1.key.id, p1);
       break;
     }
 
@@ -139,9 +143,10 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
         await sock.sendMessage(from, { text: t('afterHours', lang) });
       }
       await sock.sendMessage(from, { text: t('businessQ', lang) });
-      await sock.sendMessage(from, {
+      const p2 = await sock.sendMessage(from, {
         poll: { name: t('businessQ', lang), values: BUSINESS_OPTIONS, selectableCount: 1 },
       });
+      if (p2?.key.id) pollStore.set(p2.key.id, p2);
       convs.set(from, { step: 'awaiting_business_option', lang });
       return;
     }
@@ -172,16 +177,12 @@ export async function startBot(): Promise<void> {
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState('.baileys_auth');
 
-  const store = makeInMemoryStore({ logger });
-
   const sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: false,
     logger,
   });
-
-  store.bind(sock.ev);
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -232,7 +233,7 @@ export async function startBot(): Promise<void> {
       if (key.remoteJid.endsWith('@g.us')) continue;
 
       try {
-        const pollMsg = await store.loadMessage(key.remoteJid, key.id);
+        const pollMsg = pollStore.get(key.id);
         if (!pollMsg?.message) continue;
 
         const result = getAggregateVotesInPollMessage({
