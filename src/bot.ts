@@ -15,6 +15,8 @@ const logger = pino({ level: 'silent' });
 
 // Stores sent poll messages keyed by message ID — never overwritten by incoming events
 const pollStore = new Map<string, WAMessage>();
+// Fallback: latest poll per JID (handles server-side ID remapping)
+const pollByJid = new Map<string, WAMessage>();
 
 // ── Dubai time ───────────────────────────────────────────────────────────────
 
@@ -97,6 +99,14 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
     return;
   }
 
+  if (text.toLowerCase() === '!debug') {
+    const ids = [...pollStore.keys()].map(k => k.slice(-8)).join(', ') || 'empty';
+    const jids = [...pollByJid.keys()].map(k => k.slice(-8)).join(', ') || 'empty';
+    const state = getConv(from).step;
+    await sock.sendMessage(from, { text: `step: ${state}\npollStore IDs: ${ids}\npollByJid: ${jids}` });
+    return;
+  }
+
   switch (conv.step) {
     case 'idle': {
       convs.set(from, { step: 'awaiting_purpose', lang });
@@ -106,7 +116,9 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
       });
       if (p1?.key.id) {
         pollStore.set(p1.key.id, p1);
-        console.log('[Poll stored]', p1.key.id, '| store size:', pollStore.size);
+        pollByJid.set(from, p1);
+        const hasEncKey = !!(p1.message?.pollCreationMessage as any)?.encKey;
+        console.log('[Poll stored] id:', p1.key.id, '| encKey:', hasEncKey ? 'OK' : 'MISSING', '| store size:', pollStore.size);
       }
       break;
     }
@@ -157,7 +169,7 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
       const p2 = await sock.sendMessage(from, {
         poll: { name: t('businessQ', lang), values: BUSINESS_OPTIONS, selectableCount: 1 },
       });
-      if (p2?.key.id) pollStore.set(p2.key.id, p2);
+      if (p2?.key.id) { pollStore.set(p2.key.id, p2); pollByJid.set(from, p2); }
       convs.set(from, { step: 'awaiting_business_option', lang });
       return;
     }
@@ -213,48 +225,56 @@ export async function startBot(): Promise<void> {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // Log all events including non-notify to spot poll votes arriving on unexpected types
+    for (const msg of messages) {
+      const msgTypes = Object.keys(msg.message ?? {}).join(',');
+      console.log(`[upsert type=${type}] fromMe=${msg.key.fromMe} jid=${msg.key.remoteJid?.slice(-10)} types=${msgTypes || 'none'}`);
+    }
+
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      if (msg.key.fromMe || !msg.key.remoteJid) continue;
+      if (!msg.key.remoteJid) continue;
       if (msg.key.remoteJid.endsWith('@g.us')) continue;
 
       const from = msg.key.remoteJid;
       if (!isAllowed(from)) continue;
 
-      // Handle poll vote messages (pollUpdateMessage has no text)
+      // Handle poll vote messages (no text; may arrive fromMe or not)
       const pollUpd = msg.message?.pollUpdateMessage;
       if (pollUpd) {
         const origId = pollUpd.pollCreationMessageKey?.id;
-        console.log('[upsert pollUpdateMessage] from:', from, 'origPollId:', origId, 'inStore:', pollStore.has(origId ?? ''));
-        if (origId) {
-          const origPoll = pollStore.get(origId);
-          if (origPoll?.message) {
-            try {
-              const result = getAggregateVotesInPollMessage({
-                message: origPoll.message,
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                pollUpdates: [{
-                  pollUpdateMessageKey: msg.key,
-                  vote: pollUpd.vote as any,
-                  senderTimestampMs: pollUpd.senderTimestampMs ?? null,
-                }],
-              });
-              console.log('[upsert poll result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
-              const selected = result.find(r => r.voters.length > 0)?.name;
-              if (selected) {
-                console.log(`[upsert poll vote] ${from} → "${selected}"`);
-                await handlePollVote(sock, from, selected);
-              }
-            } catch (err) {
-              console.error('[upsert pollUpdateMessage error]', err);
+        const origPoll = (origId ? pollStore.get(origId) : undefined) ?? pollByJid.get(from);
+        console.log('[upsert pollUpdateMessage] from:', from, 'origPollId:', origId, 'foundPoll:', !!origPoll);
+        if (origPoll?.message) {
+          try {
+            const result = getAggregateVotesInPollMessage({
+              message: origPoll.message,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              pollUpdates: [{
+                pollUpdateMessageKey: msg.key,
+                vote: pollUpd.vote as any,
+                senderTimestampMs: pollUpd.senderTimestampMs ?? null,
+              }],
+            });
+            console.log('[upsert poll result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
+            const selected = result.find(r => r.voters.length > 0)?.name;
+            if (selected) {
+              console.log(`[upsert poll vote] ${from} → "${selected}"`);
+              await handlePollVote(sock, from, selected);
+            } else {
+              console.log('[upsert poll] decryption returned no winner — encKey may be missing');
             }
-          } else {
-            console.log('[upsert pollUpdateMessage] Original poll not found for id:', origId);
+          } catch (err) {
+            console.error('[upsert pollUpdateMessage error]', err);
           }
+        } else {
+          console.log('[upsert pollUpdateMessage] No matching poll in store');
         }
         continue;
       }
+
+      if (msg.key.fromMe) continue;
 
       const text =
         msg.message?.conversation ??
@@ -279,9 +299,9 @@ export async function startBot(): Promise<void> {
       if (key.remoteJid.endsWith('@g.us')) continue;
 
       try {
-        const pollMsg = pollStore.get(key.id);
+        const pollMsg = pollStore.get(key.id) ?? pollByJid.get(key.remoteJid);
         if (!pollMsg?.message) {
-          console.log('[Poll] Message not found in store for id:', key.id);
+          console.log('[messages.update] No poll found by id or jid for:', key.id);
           continue;
         }
 
@@ -295,6 +315,8 @@ export async function startBot(): Promise<void> {
         if (selected) {
           console.log(`[Poll vote] ${key.remoteJid} → "${selected}"`);
           await handlePollVote(sock, key.remoteJid, selected);
+        } else {
+          console.log('[messages.update] decryption returned no winner — encKey may be missing');
         }
       } catch (err) {
         console.error(`[${new Date().toISOString()}] Poll error:`, err);
