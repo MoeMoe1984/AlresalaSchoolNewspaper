@@ -50,11 +50,9 @@ const getConv = (jid: string): Conv =>
 // ── Text templates ────────────────────────────────────────────────────────────
 
 const MSG = {
-  greeting:        { en: 'Hello, This is the AI assistant of Dr. Mohamed Ali.', ar: 'مرحباً، أنا المساعد الذكي للدكتور محمد علي.' },
-  purposeQ:        { en: 'Is this a personal or business matter?', ar: 'هل رسالتك ذات طابع شخصي أم عمل؟' },
+  greeting:        { en: 'Hello, This is the AI assistant of Dr. Mohamed Ali.\nPlease select one of the below options.', ar: 'مرحباً، أنا المساعد الذكي للدكتور محمد علي.\nيرجى اختيار أحد الخيارات أدناه.' },
   pleaseVote:      { en: 'Please use the poll above to select an option.', ar: 'يرجى الاختيار من الاستطلاع أعلاه.' },
-  personalWorking: { en: 'Dr. Mohamed Ali will contact you later after 5 PM.', ar: 'سيتواصل معك الدكتور محمد علي لاحقاً بعد الساعة 5 مساءً.' },
-  personalWeekend: { en: 'Dr. Mohamed Ali will contact you on Monday after 8 AM.', ar: 'سيتواصل معك الدكتور محمد علي يوم الاثنين بعد الساعة 8 صباحاً.' },
+  personalReply:   { en: 'You can connect to Dr. Mohamed Ali directly and leave your message.', ar: 'يمكنك التواصل مع الدكتور محمد علي مباشرةً وترك رسالتك.' },
   businessQ:       { en: 'How can we help you?', ar: 'كيف يمكننا مساعدتك؟' },
   afterHours:      { en: '⚠️ Dr. Mohamed Ali will get back to you on Monday after 8 AM.', ar: '⚠️ سيتواصل معك الدكتور محمد علي يوم الاثنين بعد الساعة 8 صباحاً.' },
   meetingPrompt:   { en: 'Please reply with your preferred date and time and we will confirm it.', ar: 'يرجى إرسال التاريخ والوقت المناسب لك وسنؤكد الموعد.' },
@@ -100,11 +98,9 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
   switch (conv.step) {
     case 'idle': {
       convs.set(from, { step: 'awaiting_purpose', lang });
-      await sock.sendMessage(from, {
-        text: `${t('greeting', lang)}\n\n${t('purposeQ', lang)}`,
-      });
+      await sock.sendMessage(from, { text: t('greeting', lang) });
       const sent = await sock.sendMessage(from, {
-        poll: { name: t('purposeQ', lang), values: PURPOSE_OPTIONS, selectableCount: 1 },
+        poll: { name: 'Select an option / اختر خياراً', values: PURPOSE_OPTIONS, selectableCount: 1 },
       });
       if (sent?.key.id) msgStore.set(sent.key.id, sent);
       break;
@@ -136,8 +132,7 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
 
   if (conv.step === 'awaiting_purpose') {
     if (selected.includes('Personal') || selected.includes('شخصي')) {
-      const reply = isWorkingHours ? t('personalWorking', lang) : t('personalWeekend', lang);
-      await sock.sendMessage(from, { text: reply });
+      await sock.sendMessage(from, { text: t('personalReply', lang) });
       convs.set(from, { step: 'idle', lang });
       return;
     }
