@@ -3,20 +3,21 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   getAggregateVotesInPollMessage,
+  makeInMemoryStore,
   useMultiFileAuthState,
-  WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import { config } from './config';
 
 const EMAIL = 'Mohamed.ali@altron.com';
+const logger = pino({ level: 'silent' });
 
 // ── Dubai time ───────────────────────────────────────────────────────────────
 
 function getDubaiContext() {
   const dubai = new Date(Date.now() + 4 * 60 * 60 * 1000);
-  const d = dubai.getUTCDay(); // 0=Sun 1=Mon … 6=Sat
+  const d = dubai.getUTCDay();
   const h = dubai.getUTCHours();
   const isWorkingHours = d >= 1 && d <= 5 && h >= 8 && h < 17;
   const isWeekend =
@@ -42,25 +43,23 @@ type Step =
 interface Conv { step: Step; lang: Lang }
 
 const convs = new Map<string, Conv>();
-const msgStore = new Map<string, WAMessage>();
-
 const getConv = (jid: string): Conv =>
   convs.get(jid) ?? { step: 'idle', lang: 'en' };
 
 // ── Text templates ────────────────────────────────────────────────────────────
 
 const MSG = {
-  greeting:        { en: 'Hello, This is the AI assistant of Dr. Mohamed Ali.\nPlease select one of the below options.', ar: 'مرحباً، أنا المساعد الذكي للدكتور محمد علي.\nيرجى اختيار أحد الخيارات أدناه.' },
-  pleaseVote:      { en: 'Please use the poll above to select an option.', ar: 'يرجى الاختيار من الاستطلاع أعلاه.' },
-  personalReply:   { en: 'You can connect to Dr. Mohamed Ali directly and leave your message.', ar: 'يمكنك التواصل مع الدكتور محمد علي مباشرةً وترك رسالتك.' },
-  businessQ:       { en: 'How can we help you?', ar: 'كيف يمكننا مساعدتك؟' },
-  afterHours:      { en: '⚠️ Dr. Mohamed Ali will get back to you on Monday after 8 AM.', ar: '⚠️ سيتواصل معك الدكتور محمد علي يوم الاثنين بعد الساعة 8 صباحاً.' },
-  meetingPrompt:   { en: 'Please reply with your preferred date and time and we will confirm it.', ar: 'يرجى إرسال التاريخ والوقت المناسب لك وسنؤكد الموعد.' },
-  meetingConfirm:  { en: '✅ Your meeting request has been noted. Dr. Mohamed Ali will confirm shortly.', ar: '✅ تم تسجيل طلب الاجتماع. سيتواصل معك الدكتور محمد علي للتأكيد قريباً.' },
-  emailReply:      { en: `📧 Official email of Dr. Mohamed Ali:\n${EMAIL}`, ar: `📧 البريد الإلكتروني الرسمي للدكتور محمد علي:\n${EMAIL}` },
-  messagePrompt:   { en: 'Please type your message and I will make sure Dr. Mohamed Ali receives it.', ar: 'يرجى كتابة رسالتك وسأتأكد من إيصالها للدكتور محمد علي.' },
-  messageConfirm:  { en: '✅ Your message has been noted and will be forwarded to Dr. Mohamed Ali.', ar: '✅ تم استلام رسالتك وسيتم إرسالها للدكتور محمد علي.' },
-  cleared:         { en: 'Conversation reset. Send a message to start again.', ar: 'تمت إعادة المحادثة. أرسل رسالة للبدء من جديد.' },
+  greeting:       { en: 'Hello, This is the AI assistant of Dr. Mohamed Ali.\nPlease select one of the below options.', ar: 'مرحباً، أنا المساعد الذكي للدكتور محمد علي.\nيرجى اختيار أحد الخيارات أدناه.' },
+  pleaseVote:     { en: 'Please use the poll above to select an option.', ar: 'يرجى الاختيار من الاستطلاع أعلاه.' },
+  personalReply:  { en: 'You can connect to Dr. Mohamed Ali directly and leave your message.', ar: 'يمكنك التواصل مع الدكتور محمد علي مباشرةً وترك رسالتك.' },
+  businessQ:      { en: 'How can we help you?', ar: 'كيف يمكننا مساعدتك؟' },
+  afterHours:     { en: '⚠️ Dr. Mohamed Ali will get back to you on Monday after 8 AM.', ar: '⚠️ سيتواصل معك الدكتور محمد علي يوم الاثنين بعد الساعة 8 صباحاً.' },
+  meetingPrompt:  { en: 'Please reply with your preferred date and time and we will confirm it.', ar: 'يرجى إرسال التاريخ والوقت المناسب لك وسنؤكد الموعد.' },
+  meetingConfirm: { en: '✅ Your meeting request has been noted. Dr. Mohamed Ali will confirm shortly.', ar: '✅ تم تسجيل طلب الاجتماع. سيتواصل معك الدكتور محمد علي للتأكيد قريباً.' },
+  emailReply:     { en: `📧 Official email of Dr. Mohamed Ali:\n${EMAIL}`, ar: `📧 البريد الإلكتروني الرسمي للدكتور محمد علي:\n${EMAIL}` },
+  messagePrompt:  { en: 'Please type your message and I will make sure Dr. Mohamed Ali receives it.', ar: 'يرجى كتابة رسالتك وسأتأكد من إيصالها للدكتور محمد علي.' },
+  messageConfirm: { en: '✅ Your message has been noted and will be forwarded to Dr. Mohamed Ali.', ar: '✅ تم استلام رسالتك وسيتم إرسالها للدكتور محمد علي.' },
+  cleared:        { en: 'Conversation reset. Send a message to start again.', ar: 'تمت إعادة المحادثة. أرسل رسالة للبدء من جديد.' },
 } as const;
 
 const t = (key: keyof typeof MSG, lang: Lang) => MSG[key][lang];
@@ -99,10 +98,9 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
     case 'idle': {
       convs.set(from, { step: 'awaiting_purpose', lang });
       await sock.sendMessage(from, { text: t('greeting', lang) });
-      const sent = await sock.sendMessage(from, {
+      await sock.sendMessage(from, {
         poll: { name: 'Select an option / اختر خياراً', values: PURPOSE_OPTIONS, selectableCount: 1 },
       });
-      if (sent?.key.id) msgStore.set(sent.key.id, sent);
       break;
     }
 
@@ -136,16 +134,14 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
       convs.set(from, { step: 'idle', lang });
       return;
     }
-
     if (selected.includes('Business') || selected.includes('عمل')) {
       if (!isWorkingHours || isWeekend) {
         await sock.sendMessage(from, { text: t('afterHours', lang) });
       }
       await sock.sendMessage(from, { text: t('businessQ', lang) });
-      const sent = await sock.sendMessage(from, {
+      await sock.sendMessage(from, {
         poll: { name: t('businessQ', lang), values: BUSINESS_OPTIONS, selectableCount: 1 },
       });
-      if (sent?.key.id) msgStore.set(sent.key.id, sent);
       convs.set(from, { step: 'awaiting_business_option', lang });
       return;
     }
@@ -157,13 +153,11 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
       convs.set(from, { step: 'awaiting_meeting_time', lang });
       return;
     }
-
     if (selected.includes('email') || selected.includes('البريد')) {
       await sock.sendMessage(from, { text: t('emailReply', lang) });
       convs.set(from, { step: 'idle', lang });
       return;
     }
-
     if (selected.includes('message') || selected.includes('رسالة')) {
       await sock.sendMessage(from, { text: t('messagePrompt', lang) });
       convs.set(from, { step: 'awaiting_message', lang });
@@ -178,12 +172,16 @@ export async function startBot(): Promise<void> {
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState('.baileys_auth');
 
+  const store = makeInMemoryStore({ logger });
+
   const sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: false,
-    logger: pino({ level: 'silent' }),
+    logger,
   });
+
+  store.bind(sock.ev);
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -203,10 +201,6 @@ export async function startBot(): Promise<void> {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    for (const msg of messages) {
-      if (msg.key.id) msgStore.set(msg.key.id, msg);
-    }
-
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -237,16 +231,20 @@ export async function startBot(): Promise<void> {
       if (!update.pollUpdates || !key.id || !key.remoteJid) continue;
       if (key.remoteJid.endsWith('@g.us')) continue;
 
-      const pollMsg = msgStore.get(key.id);
-      if (!pollMsg) continue;
-
       try {
+        const pollMsg = await store.loadMessage(key.remoteJid, key.id);
+        if (!pollMsg?.message) continue;
+
         const result = getAggregateVotesInPollMessage({
-          message: pollMsg.message!,
+          message: pollMsg.message,
           pollUpdates: update.pollUpdates,
         });
+
         const selected = result.find(r => r.voters.length > 0)?.name;
-        if (selected) await handlePollVote(sock, key.remoteJid, selected);
+        if (selected) {
+          console.log(`[Poll vote] ${key.remoteJid} → "${selected}"`);
+          await handlePollVote(sock, key.remoteJid, selected);
+        }
       } catch (err) {
         console.error(`[${new Date().toISOString()}] Poll error:`, err);
       }
