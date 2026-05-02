@@ -117,8 +117,9 @@ async function handleText(sock: Sock, from: string, text: string): Promise<void>
       if (p1?.key.id) {
         pollStore.set(p1.key.id, p1);
         pollByJid.set(from, p1);
-        const hasEncKey = !!(p1.message?.pollCreationMessage as any)?.encKey;
-        console.log('[Poll stored] id:', p1.key.id, '| encKey:', hasEncKey ? 'OK' : 'MISSING', '| store size:', pollStore.size);
+        const pm1 = p1.message as any;
+        const poll1 = pm1?.pollCreationMessage ?? pm1?.pollCreationMessageV2 ?? pm1?.pollCreationMessageV3;
+        console.log('[Poll stored] id:', p1.key.id, '| msgKeys:', Object.keys(pm1 ?? {}).join(','), '| encKey:', poll1?.encKey ? 'OK' : 'MISSING');
       }
       break;
     }
@@ -169,7 +170,13 @@ async function handlePollVote(sock: Sock, from: string, selected: string): Promi
       const p2 = await sock.sendMessage(from, {
         poll: { name: t('businessQ', lang), values: BUSINESS_OPTIONS, selectableCount: 1 },
       });
-      if (p2?.key.id) { pollStore.set(p2.key.id, p2); pollByJid.set(from, p2); }
+      if (p2?.key.id) {
+        pollStore.set(p2.key.id, p2);
+        pollByJid.set(from, p2);
+        const pm2 = p2.message as any;
+        const poll2 = pm2?.pollCreationMessage ?? pm2?.pollCreationMessageV2 ?? pm2?.pollCreationMessageV3;
+        console.log('[Poll2 stored] id:', p2.key.id, '| encKey:', poll2?.encKey ? 'OK' : 'MISSING');
+      }
       convs.set(from, { step: 'awaiting_business_option', lang });
       return;
     }
@@ -229,6 +236,23 @@ export async function startBot(): Promise<void> {
     for (const msg of messages) {
       const msgTypes = Object.keys(msg.message ?? {}).join(',');
       console.log(`[upsert type=${type}] fromMe=${msg.key.fromMe} jid=${msg.key.remoteJid?.slice(-10)} types=${msgTypes || 'none'}`);
+    }
+
+    // Intercept bot's own sent poll messages (echo) to capture the encKey.
+    // sendMessage() returns the message before Baileys finalises it;
+    // the upsert echo contains the complete proto including encKey.
+    if (type === 'append' || type === 'notify') {
+      for (const msg of messages) {
+        if (!msg.key.fromMe || !msg.key.id || !msg.message) continue;
+        const m = msg.message as any;
+        const pollMsg = m.pollCreationMessage ?? m.pollCreationMessageV2 ?? m.pollCreationMessageV3;
+        if (pollMsg) {
+          const hasKey = !!(pollMsg.encKey);
+          pollStore.set(msg.key.id, msg);
+          if (msg.key.remoteJid) pollByJid.set(msg.key.remoteJid, msg);
+          console.log('[Poll echo] id:', msg.key.id, '| encKey:', hasKey ? 'OK' : 'still missing');
+        }
+      }
     }
 
     if (type !== 'notify') return;
