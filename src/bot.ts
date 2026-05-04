@@ -2,11 +2,12 @@ import qrcode from 'qrcode-terminal';
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  getAggregateVotesInPollMessage,
+  proto,
   useMultiFileAuthState,
   WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
+import { createDecipheriv, createHmac } from 'crypto';
 import pino from 'pino';
 import { config } from './config';
 
@@ -78,6 +79,33 @@ const BUSINESS_OPTIONS = [
   '📧 Get official email / البريد الإلكتروني',
   '✉️ Leave a message / ترك رسالة',
 ];
+
+// ── Poll vote decryption ──────────────────────────────────────────────────────
+
+// pollUpdateMessage.vote is IPollEncValue{encPayload,encIv} — AES-256-GCM encrypted.
+// Decrypt it to get the HMAC hashes of the selected options.
+function decryptPollVoteHashes(encPayload: Uint8Array, encIv: Uint8Array, encKey: Uint8Array): Uint8Array[] {
+  try {
+    const tag  = Buffer.from(encPayload.slice(-16));
+    const data = Buffer.from(encPayload.slice(0, -16));
+    const dec  = createDecipheriv('aes-256-gcm', Buffer.from(encKey), Buffer.from(encIv));
+    dec.setAuthTag(tag);
+    const plain = Buffer.concat([dec.update(data), dec.final()]);
+    const vote  = proto.Message.PollVote.decode(plain);
+    return (vote.selectedOptions ?? []) as Uint8Array[];
+  } catch {
+    return [];
+  }
+}
+
+// Compare decrypted HMAC hashes against HMAC-SHA256(encKey, optionName).
+function findVotedOption(hashes: Uint8Array[], options: string[], encKey: Uint8Array): string | undefined {
+  for (const option of options) {
+    const expected = createHmac('sha256', Buffer.from(encKey)).update(option).digest();
+    if (hashes.some(h => Buffer.compare(Buffer.from(h), expected) === 0)) return option;
+  }
+  return undefined;
+}
 
 // ── Poll storage helper ───────────────────────────────────────────────────────
 
@@ -262,37 +290,25 @@ export async function startBot(): Promise<void> {
           continue;
         }
 
-        // Patch messageSecret into encKey on all poll creation message variants so
-        // getAggregateVotesInPollMessage can find it and decrypt the encPayload
-        const keyBuf = Buffer.from(secret);
-        const patchedMsg = { ...origPoll.message } as any;
-        if (patchedMsg.pollCreationMessageV3)
-          patchedMsg.pollCreationMessageV3 = { ...patchedMsg.pollCreationMessageV3, encKey: keyBuf };
-        if (patchedMsg.pollCreationMessageV2)
-          patchedMsg.pollCreationMessageV2 = { ...patchedMsg.pollCreationMessageV2, encKey: keyBuf };
-        if (patchedMsg.pollCreationMessage)
-          patchedMsg.pollCreationMessage = { ...patchedMsg.pollCreationMessage, encKey: keyBuf };
-        else {
-          const src = patchedMsg.pollCreationMessageV3 ?? patchedMsg.pollCreationMessageV2;
-          if (src) patchedMsg.pollCreationMessage = { ...src, encKey: keyBuf };
+        // Decrypt the AES-256-GCM encrypted vote payload to get the HMAC hashes
+        const encVote = pollUpd.vote as any;
+        const hashes  = decryptPollVoteHashes(encVote?.encPayload, encVote?.encIv, secret);
+        console.log('[vote] decrypted hashes:', hashes.length);
+
+        if (hashes.length === 0) {
+          console.log('[vote] deselect or decryption failed — ignoring');
+          continue;
         }
 
-        try {
-          const result = getAggregateVotesInPollMessage({
-            message: patchedMsg,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            pollUpdates: [{ pollUpdateMessageKey: msg.key, vote: pollUpd.vote as any, senderTimestampMs: pollUpd.senderTimestampMs ?? null }],
-          });
-          console.log('[vote result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
-          const selected = result.find(r => r.voters.length > 0)?.name;
-          if (selected) {
-            console.log(`[vote] ${from} → "${selected}"`);
-            await handlePollVote(sock, from, selected);
-          } else {
-            console.log('[vote] decrypted but no winner');
-          }
-        } catch (err) {
-          console.error('[vote error]', err);
+        const conv    = getConv(from);
+        const options = conv.step === 'awaiting_purpose' ? PURPOSE_OPTIONS : BUSINESS_OPTIONS;
+        const selected = findVotedOption(hashes, options, secret);
+
+        if (selected) {
+          console.log(`[vote] ${from} → "${selected}"`);
+          await handlePollVote(sock, from, selected);
+        } else {
+          console.log('[vote] no option matched');
         }
         continue;
       }
