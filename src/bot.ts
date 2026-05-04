@@ -2,11 +2,11 @@ import qrcode from 'qrcode-terminal';
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
+  getAggregateVotesInPollMessage,
   useMultiFileAuthState,
   WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import { createHmac } from 'crypto';
 import pino from 'pino';
 import { config } from './config';
 
@@ -78,25 +78,6 @@ const BUSINESS_OPTIONS = [
   '📧 Get official email / البريد الإلكتروني',
   '✉️ Leave a message / ترك رسالة',
 ];
-
-// ── Poll vote decoder ─────────────────────────────────────────────────────────
-
-// WhatsApp encodes each selected option as HMAC-SHA256(messageSecret, optionName).
-function findVotedOption(
-  selectedHashes: Uint8Array[],
-  options: string[],
-  secret: Uint8Array,
-): string | undefined {
-  for (const option of options) {
-    const expected = createHmac('sha256', Buffer.from(secret))
-      .update(Buffer.from(option))
-      .digest();
-    if (selectedHashes.some(
-      h => h.length === expected.length && h.every((b, i) => b === expected[i]),
-    )) return option;
-  }
-  return undefined;
-}
 
 // ── Poll storage helper ───────────────────────────────────────────────────────
 
@@ -266,35 +247,52 @@ export async function startBot(): Promise<void> {
       const pollUpd = msg.message?.pollUpdateMessage;
       if (pollUpd) {
         const origId = pollUpd.pollCreationMessageKey?.id;
-        const selectedHashes: Uint8Array[] = (pollUpd.vote as any)?.selectedOptions ?? [];
+        const origPoll = (origId ? pollStore.get(origId) : undefined) ?? pollByJid.get(from);
 
-        console.log('[vote] from:', from, 'origId:', origId, 'selected:', selectedHashes.length);
-
-        if (selectedHashes.length === 0) {
-          // User deselected — ignore
-          continue;
-        }
-
-        // Resolve the secret: by poll ID first, then by JID fallback
+        // Resolve messageSecret (stored in messageContextInfo, not pollCreationMessageV3.encKey)
         const secret: Uint8Array | undefined =
           (origId ? pollKeyStore.get(origId) : undefined) ??
           (origId ? ((pollStore.get(origId)?.message as any)?.messageContextInfo?.messageSecret) : undefined) ??
           ((pollByJid.get(from)?.message as any)?.messageContextInfo?.messageSecret);
 
-        if (!secret?.length) {
-          console.log('[vote] no messageSecret found for poll');
+        console.log('[vote] from:', from, 'origId:', origId, 'foundPoll:', !!origPoll, 'hasSecret:', !!secret);
+
+        if (!origPoll?.message || !secret?.length) {
+          console.log('[vote] missing poll or secret — ignoring');
           continue;
         }
 
-        const conv = getConv(from);
-        const options = conv.step === 'awaiting_purpose' ? PURPOSE_OPTIONS : BUSINESS_OPTIONS;
-        const selected = findVotedOption(selectedHashes, options, secret);
+        // Patch messageSecret into encKey on all poll creation message variants so
+        // getAggregateVotesInPollMessage can find it and decrypt the encPayload
+        const keyBuf = Buffer.from(secret);
+        const patchedMsg = { ...origPoll.message } as any;
+        if (patchedMsg.pollCreationMessageV3)
+          patchedMsg.pollCreationMessageV3 = { ...patchedMsg.pollCreationMessageV3, encKey: keyBuf };
+        if (patchedMsg.pollCreationMessageV2)
+          patchedMsg.pollCreationMessageV2 = { ...patchedMsg.pollCreationMessageV2, encKey: keyBuf };
+        if (patchedMsg.pollCreationMessage)
+          patchedMsg.pollCreationMessage = { ...patchedMsg.pollCreationMessage, encKey: keyBuf };
+        else {
+          const src = patchedMsg.pollCreationMessageV3 ?? patchedMsg.pollCreationMessageV2;
+          if (src) patchedMsg.pollCreationMessage = { ...src, encKey: keyBuf };
+        }
 
-        if (selected) {
-          console.log(`[vote] ${from} → "${selected}"`);
-          await handlePollVote(sock, from, selected);
-        } else {
-          console.log('[vote] HMAC matched no option — wrong step or wrong key');
+        try {
+          const result = getAggregateVotesInPollMessage({
+            message: patchedMsg,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            pollUpdates: [{ pollUpdateMessageKey: msg.key, vote: pollUpd.vote as any, senderTimestampMs: pollUpd.senderTimestampMs ?? null }],
+          });
+          console.log('[vote result]', result.map(r => `${r.name}:${r.voters.length}`).join(', '));
+          const selected = result.find(r => r.voters.length > 0)?.name;
+          if (selected) {
+            console.log(`[vote] ${from} → "${selected}"`);
+            await handlePollVote(sock, from, selected);
+          } else {
+            console.log('[vote] decrypted but no winner');
+          }
+        } catch (err) {
+          console.error('[vote error]', err);
         }
         continue;
       }
